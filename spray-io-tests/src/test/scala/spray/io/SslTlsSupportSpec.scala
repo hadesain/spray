@@ -41,6 +41,7 @@ class SslTlsSupportSpec extends Specification with NoTimeConversions {
       loglevel = WARNING
       io.tcp.trace-logging = off
     }""")
+  val sslTraceLogging = true
   implicit val system = ActorSystem(Utils.actorSystemNameFrom(getClass), testConf)
   import system.dispatcher
 
@@ -149,14 +150,15 @@ class SslTlsSupportSpec extends Specification with NoTimeConversions {
       serverConn.writeLn("bar")
       clientConn.events.expectMsg(Tcp.Received(ByteString("bar\n")))
 
-      clientConn.command(Tcp.ConfirmedClosed)
+      clientConn.command(Tcp.ConfirmedClose)
+      serverConn.readLn()
       clientConn.events.expectMsg(Tcp.ConfirmedClosed)
       TestUtils.verifyActorTermination(clientConn.handler)
       serverConn.close()
       server.close()
     }
 
-    "produce a PeerClosed event upon receiving an SSL-level termination sequence" in new TestSetup(blockClosedEvent = true) {
+    "produce a PeerClosed event upon receiving an SSL-level termination sequence" in new TestSetup {
       val server = new JavaSslServer
       val connAttempt = attemptSpraySslClientConnection(server.address)
       val serverConn = server.acceptOne()
@@ -178,7 +180,7 @@ class SslTlsSupportSpec extends Specification with NoTimeConversions {
 
   val counter = new AtomicInteger
 
-  class TestSetup(publishSslSessionInfo: Boolean = false, blockClosedEvent: Boolean = false) extends org.specs2.specification.Scope {
+  class TestSetup(publishSslSessionInfo: Boolean = false) extends org.specs2.specification.Scope {
     implicit val sslContext = createSSLContext("/ssl-test-keystore.jks", "")
 
     def sessionCounts() = (clientSessions().length, serverSessions().length)
@@ -256,7 +258,7 @@ class SslTlsSupportSpec extends Specification with NoTimeConversions {
 
     class ConnectionActor[T <: (PipelineContext ⇒ Option[SSLEngine])](events: ActorRef, connection: ActorRef,
                                                                       connected: Tcp.Connected)(implicit engineProvider: T) extends ConnectionHandler {
-      val pipeline = frontend >> SslTlsSupport(publishSslSessionInfo) >> (filterPeerClosed ? blockClosedEvent)
+      val pipeline = frontend >> SslTlsSupport(128, publishSslSessionInfo, sslTraceLogging)
       def receive = running(connection, pipeline, createSslTlsContext[T](connected))
       def frontend: PipelineStage = new PipelineStage {
         def apply(context: PipelineContext, commandPL: CPL, eventPL: EPL): Pipelines =
@@ -268,15 +270,6 @@ class SslTlsSupportSpec extends Specification with NoTimeConversions {
                 if (ev.isInstanceOf[Tcp.ConnectionClosed]) eventPL(ev)
             }
           }
-      }
-      def filterPeerClosed: PipelineStage = new PipelineStage {
-        def apply(context: PipelineContext, commandPL: CPL, eventPL: EPL): Pipelines = new Pipelines {
-          val commandPipeline = commandPL
-          val eventPipeline: EPL = {
-            case x: Tcp.ConnectionClosed ⇒ log.debug("Blocking ConnectionClosed event: " + x)
-            case ev                      ⇒ eventPL(ev)
-          }
-        }
       }
     }
 
